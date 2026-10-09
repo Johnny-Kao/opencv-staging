@@ -1,0 +1,75 @@
+name: AVFoundation BGRA before-after performance (public)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: macos-26
+    timeout-minutes: 100
+    steps:
+      - name: Checkout benchmark harness and fixed source
+        uses: actions/checkout@v4
+        with:
+          ref: research/repeated-retrieve-review-validation
+          path: fixed
+      - name: Checkout original source before reviewer fix
+        uses: actions/checkout@v4
+        with:
+          ref: perf/avfoundation-bgra-zero-copy
+          path: before
+      - name: Environment and source identity
+        run: |
+          uname -m
+          sw_vers
+          git -C before rev-parse HEAD
+          git -C fixed rev-parse HEAD
+      - name: Build both revisions with identical release flags
+        run: |
+          for variant in before fixed; do
+            cmake -S "$variant" -B "/tmp/ocv-${variant}" \
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+              -DBUILD_LIST=core,imgproc,videoio \
+              -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
+              -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
+              -DBUILD_JAVA=OFF -DBUILD_opencv_python3=OFF \
+              -DWITH_OPENCL=OFF -DWITH_IPP=OFF
+            cmake --build "/tmp/ocv-${variant}" --config Release -j 3
+            clang++ -std=c++17 -O3 \
+              -I"$GITHUB_WORKSPACE/${variant}/include" \
+              -I"/tmp/ocv-${variant}" \
+              -I"$GITHUB_WORKSPACE/${variant}/modules/core/include" \
+              -I"$GITHUB_WORKSPACE/${variant}/modules/imgproc/include" \
+              -I"$GITHUB_WORKSPACE/${variant}/modules/videoio/include" \
+              fixed/tools/research/opencv_apple_n1_grab_retrieve_split.cpp \
+              -L"/tmp/ocv-${variant}/lib" \
+              -lopencv_videoio -lopencv_imgproc -lopencv_core \
+              -framework Foundation -framework AVFoundation -framework CoreMedia -framework CoreVideo \
+              -Wl,-rpath,"/tmp/ocv-${variant}/lib" \
+              -o "/tmp/benchmark-${variant}"
+          done
+      - name: Generate same 4K 25-second H264 input
+        run: |
+          brew install ffmpeg
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i testsrc2=size=3840x2160:rate=30 \
+            -t 25 -c:v h264_videotoolbox -b:v 25M \
+            -pix_fmt yuv420p /tmp/n1-comparison.mp4
+      - name: Controlled alternated 4K comparisons
+        run: |
+          set -o pipefail
+          for trial in 1 2 3 4; do
+            if (( trial % 2 == 1 )); then order="before fixed"; mode="bgr-first"; else order="fixed before"; mode="bgra-first"; fi
+            for variant in $order; do
+              echo "TRIAL=${trial} VARIANT=${variant} ORDER=${mode}"
+              "/tmp/benchmark-${variant}" /tmp/n1-comparison.mp4 "$mode"
+            done
+          done | tee /tmp/comparison-results.txt
+      - name: Copy evidence to run summary
+        if: always()
+        run: |
+          echo '## N1 4K comparison: original vs reviewer fix' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Four alternating trials, 60 warmup + 500 measured frames per mode and trial. Exact same generated input and hosted runner.' >> "$GITHUB_STEP_SUMMARY"
+          echo '~~~text' >> "$GITHUB_STEP_SUMMARY"
+          if test -f /tmp/comparison-results.txt; then grep -E 'TRIAL=|^\\{' /tmp/comparison-results.txt >> "$GITHUB_STEP_SUMMARY"; fi
+          echo '~~~' >> "$GITHUB_STEP_SUMMARY"
