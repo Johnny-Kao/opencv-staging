@@ -1,0 +1,51 @@
+name: Public OpenCV AVFoundation repeated-retrieve regression
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Public opencv-staging ref containing fix and regression
+        required: true
+        default: research/repeated-retrieve-review-validation
+        type: string
+permissions:
+  contents: read
+jobs:
+  focused-macos:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_ref }}
+      - name: Report exact source
+        run: |
+          git rev-parse HEAD
+          uname -m
+          sw_vers
+      - name: Fetch OpenCV test fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: opencv/opencv_extra
+          ref: 5.x
+          path: opencv_extra
+      - name: Compile focused videoio tests
+        run: |
+          cmake -S . -B /tmp/ocv-review-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_LIST=core,imgproc,imgcodecs,videoio,ts \
+            -DBUILD_TESTS=ON \
+            -DBUILD_PERF_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_opencv_apps=OFF \
+            -DBUILD_JAVA=OFF \
+            -DBUILD_opencv_python3=OFF \
+            -DWITH_OPENCL=OFF \
+            -DWITH_IPP=OFF
+          cmake --build /tmp/ocv-review-build --config Release --target opencv_test_videoio -j 3
+      - name: Run reviewer regression and AVFoundation frame lifetime
+        env:
+          OPENCV_TEST_DATA_PATH: ${{ github.workspace }}/opencv_extra/testdata
+        run: |
+          /tmp/ocv-review-build/bin/opencv_test_videoio \
+            --gtest_filter='*videoio_avfoundation.bgra_output_preserves_pixels_and_lifetime*:*frames_independency/*AVFOUNDATION*'
